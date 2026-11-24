@@ -29,14 +29,14 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon
+      - name: Build Release APK (R8 optimized)
+        run: ./gradlew assembleRelease --no-daemon
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SmartPrintDirect-Debug-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: SmartPrintDirect-Release-APK
+          path: app/build/outputs/apk/release/app-release.apk
 
       # Publishes a GitHub release + refreshes version.json (used by the in-app updater)
       # only when the versionName in app/build.gradle.kts has no release yet.
@@ -53,7 +53,7 @@ jobs:
             echo "Release $TAG already exists - skipping"
             exit 0
           fi
-          cp app/build/outputs/apk/debug/app-debug.apk SmartPrintDirect.apk
+          cp app/build/outputs/apk/release/app-release.apk SmartPrintDirect.apk
           SHA=$(sha256sum SmartPrintDirect.apk | cut -d' ' -f1)
           NOTES=$(git log -1 --pretty=%s)
           gh release create "$TAG" SmartPrintDirect.apk --title "SmartPrintDirect $TAG" --notes "$NOTES" --target "$GITHUB_SHA"

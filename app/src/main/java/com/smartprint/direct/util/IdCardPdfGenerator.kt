@@ -85,8 +85,16 @@ object IdCardPdfGenerator {
 
     fun uriToBitmap(context: Context, uri: Uri): Bitmap? {
         return try {
+            // Decode at a bounded size: full-res camera photos (12MP+) freeze the UI and are drawn
+            // every frame. 2048px on the long edge is plenty for a half-A4 ID card at 300dpi.
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            var sample = 1
+            val longEdge = maxOf(bounds.outWidth, bounds.outHeight)
+            while (longEdge / (sample * 2) >= 2048) sample *= 2
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
             context.contentResolver.openInputStream(uri)?.use { stream ->
-                BitmapFactory.decodeStream(stream)
+                BitmapFactory.decodeStream(stream, null, opts)
             }
         } catch (_: Exception) {
             null

@@ -17,6 +17,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.core.content.ContextCompat
 import androidx.navigation.compose.NavHost
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.unit.IntOffset
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.smartprint.direct.ui.screens.*
@@ -79,39 +82,20 @@ class MainActivity : ComponentActivity() {
 fun AppNavigation(viewModel: SmartPrintViewModel) {
     val navController = rememberNavController()
 
-    // Authentic iOS Fluid Spring Transitions
-    val springSpec = spring<Float>(
-        stiffness = Spring.StiffnessMediumLow,
-        dampingRatio = Spring.DampingRatioNoBouncy
-    )
+    // iOS UINavigationController push/pop: incoming screen slides in from the right edge, the
+    // outgoing one moves left by ~30% (parallax). No alpha animation on purpose: fades force
+    // offscreen layers for the whole screen, which is what made transitions stutter.
+    val iosEasing = CubicBezierEasing(0.32f, 0.72f, 0f, 1f) // iOS standard curve
+    val durationMs = 380
+    val push = tween<IntOffset>(durationMs, easing = iosEasing)
 
     NavHost(
         navController = navController,
         startDestination = "dashboard",
-        enterTransition = {
-            slideInHorizontally(
-                initialOffsetX = { fullWidth -> fullWidth },
-                animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = Spring.DampingRatioNoBouncy)
-            ) + fadeIn(animationSpec = tween(240))
-        },
-        exitTransition = {
-            slideOutHorizontally(
-                targetOffsetX = { fullWidth -> -fullWidth / 4 },
-                animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = Spring.DampingRatioNoBouncy)
-            ) + fadeOut(animationSpec = tween(240))
-        },
-        popEnterTransition = {
-            slideInHorizontally(
-                initialOffsetX = { fullWidth -> -fullWidth / 4 },
-                animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = Spring.DampingRatioNoBouncy)
-            ) + fadeIn(animationSpec = tween(240))
-        },
-        popExitTransition = {
-            slideOutHorizontally(
-                targetOffsetX = { fullWidth -> fullWidth },
-                animationSpec = spring(stiffness = Spring.StiffnessMediumLow, dampingRatio = Spring.DampingRatioNoBouncy)
-            ) + fadeOut(animationSpec = tween(240))
-        }
+        enterTransition = { slideInHorizontally(animationSpec = push) { it } },
+        exitTransition = { slideOutHorizontally(animationSpec = push) { -(it * 3 / 10) } },
+        popEnterTransition = { slideInHorizontally(animationSpec = push) { -(it * 3 / 10) } },
+        popExitTransition = { slideOutHorizontally(animationSpec = push) { it } }
     ) {
         composable("dashboard") {
             DashboardScreen(

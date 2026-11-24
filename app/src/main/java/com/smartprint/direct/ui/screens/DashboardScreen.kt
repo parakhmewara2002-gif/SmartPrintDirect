@@ -114,13 +114,13 @@ fun DashboardScreen(
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            item {
+            item(key = "dash_1", contentType = "card") {
                 Spacer(modifier = Modifier.height(2.dp))
                 DualNetworkStatusBar(networkState = networkState)
             }
 
             if (updateInfo?.hasUpdate == true) {
-                item {
+                item(key = "dash_2", contentType = "card") {
                     Surface(
                         shape = RoundedCornerShape(12.dp),
                         color = Color(0xFFEFF6FF),
@@ -170,7 +170,7 @@ fun DashboardScreen(
             }
 
             if (printStatus != null) {
-                item {
+                item(key = "dash_3", contentType = "card") {
                     Surface(
                         shape = RoundedCornerShape(8.dp),
                         color = Color(0xFFEFF6FF),
@@ -198,7 +198,7 @@ fun DashboardScreen(
                 }
             }
 
-            item {
+            item(key = "dash_4", contentType = "card") {
                 HpHeroPrinterCard(
                     printer = printer,
                     onSelectPrinterClick = { showPrinterDialog = true },
@@ -207,7 +207,7 @@ fun DashboardScreen(
             }
 
             if (deviceDetails != null && printer != null) {
-                item {
+                item(key = "dash_5", contentType = "card") {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
@@ -241,7 +241,7 @@ fun DashboardScreen(
             }
 
             // NEW FEATURE: ID Card Print (Front + Back) Hero Banner
-            item {
+            item(key = "dash_6", contentType = "card") {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -308,7 +308,7 @@ fun DashboardScreen(
             }
 
             // 2x2 Action Tiles
-            item {
+            item(key = "dash_7", contentType = "card") {
                 Text(
                     text = "PRINT & SCAN SHORTCUTS",
                     fontSize = 11.sp,
@@ -338,7 +338,7 @@ fun DashboardScreen(
                 }
             }
 
-            item {
+            item(key = "dash_8", contentType = "card") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -361,7 +361,7 @@ fun DashboardScreen(
             }
 
             // Quick Tools & Actions
-            item {
+            item(key = "dash_9", contentType = "card") {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)

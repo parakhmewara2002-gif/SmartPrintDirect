@@ -16,6 +16,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,18 +47,22 @@ fun IdCardPrintScreen(
     var copies by remember { mutableStateOf(1) }
     var activeSlot by remember { mutableStateOf<String?>("front") } // "front" or "back"
 
+    val scope = rememberCoroutineScope()
     val imagePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
         if (uri != null) {
-            val bmp = IdCardPdfGenerator.uriToBitmap(context, uri)
-            if (bmp != null) {
-                if (activeSlot == "front") {
-                    frontBitmap = bmp
-                    activeSlot = if (backBitmap == null) "back" else null
-                } else if (activeSlot == "back") {
-                    backBitmap = bmp
-                    activeSlot = null
+            val slot = activeSlot
+            scope.launch {
+                val bmp = withContext(Dispatchers.IO) { IdCardPdfGenerator.uriToBitmap(context, uri) }
+                if (bmp != null) {
+                    if (slot == "front") {
+                        frontBitmap = bmp
+                        activeSlot = if (backBitmap == null) "back" else null
+                    } else if (slot == "back") {
+                        backBitmap = bmp
+                        activeSlot = null
+                    }
                 }
             }
         }
@@ -144,7 +151,7 @@ fun IdCardPrintScreen(
 
                     if (frontBitmap != null) {
                         Image(
-                            bitmap = frontBitmap!!.asImageBitmap(),
+                            bitmap = remember(frontBitmap) { frontBitmap!!.asImageBitmap() },
                             contentDescription = "Front Side",
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -225,7 +232,7 @@ fun IdCardPrintScreen(
 
                     if (backBitmap != null) {
                         Image(
-                            bitmap = backBitmap!!.asImageBitmap(),
+                            bitmap = remember(backBitmap) { backBitmap!!.asImageBitmap() },
                             contentDescription = "Back Side",
                             modifier = Modifier
                                 .fillMaxWidth()
