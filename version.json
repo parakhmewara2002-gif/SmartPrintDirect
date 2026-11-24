@@ -1,7 +1,7 @@
 {
-  "versionCode": 2,
-  "versionName": "1.0.1",
-  "changelog": "v1.0.1: smoother UI - iOS-style nav transitions, R8 release build, async downsampled ID photo decode",
-  "apkUrl": "https://github.com/parakhmewara2002-gif/SmartPrintDirect/releases/download/v1.0.1/SmartPrintDirect.apk",
-  "expectedSha256": "10c47cf72dc48daa4c43a8a7197000c881a3f8c9bfa7a5d5d270fd5609311cfb"
+  "versionCode": 3,
+  "versionName": "1.0.2",
+  "changelog": "v1.0.2: new app icon (adaptive + themed) and animated splash screen",
+  "apkUrl": "https://github.com/parakhmewara2002-gif/SmartPrintDirect/releases/download/v1.0.2/SmartPrintDirect.apk",
+  "expectedSha256": "912a78830bf52022a1394dc7aed20cf554865f18cdae9d4c59d5c37a71f35b14"
 }
