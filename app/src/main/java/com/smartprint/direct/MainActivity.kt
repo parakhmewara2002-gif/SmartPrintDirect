@@ -6,6 +6,9 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
+import android.view.animation.DecelerateInterpolator
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -37,6 +40,21 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Must run before super.onCreate: swaps the Starting theme for the app theme.
+        val splash = installSplashScreen()
+        val splashStart = SystemClock.uptimeMillis()
+        // Hold the branded splash just long enough for the icon animation to play.
+        splash.setKeepOnScreenCondition { SystemClock.uptimeMillis() - splashStart < 650 }
+        splash.setOnExitAnimationListener { provider ->
+            provider.view.animate()
+                .alpha(0f)
+                .scaleX(1.06f)
+                .scaleY(1.06f)
+                .setDuration(320)
+                .setInterpolator(DecelerateInterpolator(1.6f))
+                .withEndAction { provider.remove() }
+                .start()
+        }
         super.onCreate(savedInstanceState)
 
         val needed = mutableListOf<String>()
