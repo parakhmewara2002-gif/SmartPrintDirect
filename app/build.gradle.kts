@@ -21,6 +21,17 @@ android {
         }
     }
 
+    // Fixed keystore so every CI-built APK has the SAME signature and in-app updates install over
+    // each other. NOTE: committed to a public repo - move to a GitHub Secret for real protection.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("smartprint-ci.jks")
+            storePassword = "smartprint-ci"
+            keyAlias = "smartprint"
+            keyPassword = "smartprint-ci"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
