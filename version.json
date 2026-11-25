@@ -1,7 +1,7 @@
 {
-  "versionCode": 3,
-  "versionName": "1.0.2",
-  "changelog": "v1.0.2: new app icon (adaptive + themed) and animated splash screen",
-  "apkUrl": "https://github.com/parakhmewara2002-gif/SmartPrintDirect/releases/download/v1.0.2/SmartPrintDirect.apk",
-  "expectedSha256": "912a78830bf52022a1394dc7aed20cf554865f18cdae9d4c59d5c37a71f35b14"
+  "versionCode": 4,
+  "versionName": "1.0.3",
+  "changelog": "fix: extensive bug sweep (printing protocols, USB, updater, scan capture, nav safety, EXIF/PDF)",
+  "apkUrl": "https://github.com/parakhmewara2002-gif/SmartPrintDirect/releases/download/v1.0.3/SmartPrintDirect.apk",
+  "expectedSha256": "f6442988a12c12db486ab1d45085ca358da8e24133eef34f8838390b526bc6f2"
 }
