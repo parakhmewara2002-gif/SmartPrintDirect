@@ -11,112 +11,154 @@ import com.smartprint.direct.model.PrintProtocol
 import com.smartprint.direct.network.DualNetworkRouter
 import com.smartprint.direct.protocol.CanonBjnpProtocol
 import com.smartprint.direct.protocol.LprPrintProtocol
+import com.smartprint.direct.usb.UsbPrinterManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.InputStream
-import java.io.OutputStream
 
 /**
- * Universal Multi-Brand Print Engine (Production Hardened)
- * - BUG-07 FIX: Multi-Protocol Auto-Fallback (RAW 9100 -> IPP 631 -> LPR 515)
- * - BUG-08 FIX: TCP shutdownOutput flush prevents truncated print jobs on embedded controllers
+ * Print engine. Every attempt is a REAL transport (RAW 9100, LPR 515, USB). A transport that cannot
+ * deliver the job returns a failure, so the next one is tried and the user sees a truthful result.
+ *
+ * Fixed vs. the previous version:
+ *  - the document was read fully into the heap (OOM on big PDFs) -> now spooled to a cache file
+ *  - the "IPP fallback" wrote raw PJL+PDF bytes to port 631 (not HTTP) and always reported success,
+ *    which also blocked the LPR fallback -> removed
+ *  - sockets leaked on any exception -> always closed
+ *  - PJL job name was not escaped (quotes / newlines broke or injected into the PJL stream)
+ *  - the PJL header lacked the leading UEL, and the job could be cut off by closing right after FIN
+ *  - USB_OTG printers were selectable but no code path ever printed to them
  */
 class HpPrintEngine(
     private val context: Context,
-    private val router: DualNetworkRouter
+    private val router: DualNetworkRouter,
+    private val usb: UsbPrinterManager? = null
 ) {
+
+    private data class Attempt(val label: String, val run: suspend (File) -> Result<Boolean>)
 
     suspend fun printUniversal(
         printer: HpPrinter,
         job: PrintJob,
         documentStream: InputStream
     ): Result<Boolean> = withContext(Dispatchers.IO) {
-        // Cache stream bytes if small or copy to temp buffer so we can retry on fallback
-        val spoolBytes = documentStream.readBytes()
+        var spool: File? = null
+        try {
+            spool = File.createTempFile("print_spool_", ".bin", context.cacheDir)
+            documentStream.use { input ->
+                FileOutputStream(spool).use { out -> input.copyTo(out, 16 * 1024) }
+            }
+            if (spool.length() == 0L) {
+                return@withContext Result.failure(Exception("Document is empty"))
+            }
 
-        when (printer.protocol) {
-            PrintProtocol.CANON_BJNP -> {
-                Log.i("UniversalEngine", "Routing via Canon BJNP protocol (Port 8611)")
-                val res = CanonBjnpProtocol.printViaBjnp(printer.ipAddress, ByteArrayInputStream(spoolBytes), router)
+            val raw = Attempt("RAW 9100") { f ->
+                val port = if (printer.protocol == PrintProtocol.RAW_9100 && printer.port > 0) printer.port else 9100
+                sendRaw(printer.ipAddress, port, job, f)
+            }
+            val lpr = Attempt("LPR 515") { f ->
+                LprPrintProtocol.printViaLpr(printer.ipAddress, "raw", job.title, FileInputStream(f), router)
+            }
+            val bjnp = Attempt("Canon BJNP") { f ->
+                CanonBjnpProtocol.printViaBjnp(printer.ipAddress, FileInputStream(f), router)
+            }
+            val usbAttempt = Attempt("USB") { f ->
+                usb?.printViaUsbById(printer.id, f)
+                    ?: Result.failure(Exception("USB printing is not available"))
+            }
+
+            val order = when (printer.protocol) {
+                PrintProtocol.USB_OTG -> listOf(usbAttempt)
+                PrintProtocol.CANON_BJNP -> listOf(bjnp, raw, lpr)
+                PrintProtocol.LPR_515 -> listOf(lpr, raw)
+                else -> listOf(raw, lpr) // RAW_9100 and IPP-advertised printers (IPP itself is not implemented here)
+            }
+
+            val errors = mutableListOf<String>()
+            for (attempt in order) {
+                val res = attempt.run(spool)
                 if (res.isSuccess) return@withContext res
-                Log.w("UniversalEngine", "BJNP failed, falling back to RAW 9100")
-                printDirectToJetDirect(printer, job, ByteArrayInputStream(spoolBytes))
+                val msg = res.exceptionOrNull()?.message ?: "failed"
+                Log.w("PrintEngine", "${attempt.label} failed: $msg")
+                if (attempt.label != "Canon BJNP") errors += "${attempt.label}: $msg"
             }
-            PrintProtocol.LPR_515 -> {
-                Log.i("UniversalEngine", "Routing via LPR/LPD protocol (Port 515)")
-                val res = LprPrintProtocol.printViaLpr(printer.ipAddress, "raw", job.title, ByteArrayInputStream(spoolBytes), router)
-                if (res.isSuccess) return@withContext res
-                Log.w("UniversalEngine", "LPR failed, falling back to RAW 9100")
-                printDirectToJetDirect(printer, job, ByteArrayInputStream(spoolBytes))
-            }
-            else -> {
-                // Primary: Port 9100 RAW Socket
-                val primaryResult = printDirectToJetDirect(printer, job, ByteArrayInputStream(spoolBytes))
-                if (primaryResult.isSuccess) {
-                    return@withContext primaryResult
-                }
-
-                // BUG-07 FIX: Fallback 1 -> Try IPP Port 631 if RAW 9100 failed
-                Log.w("UniversalEngine", "Primary Port 9100 failed, attempting IPP Port 631 fallback")
-                val ippPrinter = printer.copy(port = 631, protocol = PrintProtocol.IPP_EVERYWHERE)
-                val ippResult = printDirectToJetDirect(ippPrinter, job, ByteArrayInputStream(spoolBytes))
-                if (ippResult.isSuccess) {
-                    return@withContext ippResult
-                }
-
-                // Fallback 2 -> Try LPR Port 515
-                Log.w("UniversalEngine", "IPP fallback failed, attempting LPR Port 515 fallback")
-                LprPrintProtocol.printViaLpr(printer.ipAddress, "raw", job.title, ByteArrayInputStream(spoolBytes), router)
-            }
+            Result.failure(Exception(errors.joinToString(" | ").ifBlank { "No transport available" }))
+        } catch (e: Throwable) { // includes OutOfMemoryError / disk full
+            Log.e("PrintEngine", "Print failed", e)
+            Result.failure(Exception(e.message ?: e.javaClass.simpleName))
+        } finally {
+            spool?.delete()
         }
     }
 
-    /**
-     * Sends raw stream directly over Port 9100 or 631 with PJL envelope.
-     * BUG-08 FIX: Uses socket.shutdownOutput() to gracefully end TCP stream without truncating data.
-     */
-    suspend fun printDirectToJetDirect(
-        printer: HpPrinter,
-        job: PrintJob,
-        documentStream: InputStream
-    ): Result<Boolean> = withContext(Dispatchers.IO) {
-        try {
-            Log.i("HpPrintEngine", "Opening bound Wi-Fi socket to printer: ${printer.ipAddress}:${printer.port}")
-            // 10 second timeout for waking sleeping printers
-            val socket = router.createBoundSocket(printer.ipAddress, printer.port, timeoutMs = 10000)
+    private fun sendRaw(host: String, port: Int, job: PrintJob, file: File): Result<Boolean> {
+        var socket: java.net.Socket? = null
+        return try {
+            Log.i("PrintEngine", "Opening Wi-Fi-bound socket to $host:$port")
+            socket = router.createBoundSocket(host, port, timeoutMs = 10000)
+            socket.soTimeout = 15000
+            val out = socket.getOutputStream()
 
-            val outputStream: OutputStream = socket.getOutputStream()
-            val buffer = ByteArray(8192)
-            var bytesRead: Int
-            var totalBytes = 0L
+            val name = job.title.filter { it in ' '..'~' && it != '"' }.take(60).ifBlank { "SmartPrintJob" }
+            val copies = job.copies.coerceIn(1, 99)
+            val uel = "\u001B%-12345X"
+            val header = uel + "@PJL\r\n" +
+                "@PJL JOB NAME = \"$name\"\r\n" +
+                "@PJL SET COPIES = $copies\r\n" +
+                "@PJL ENTER LANGUAGE = PDF\r\n"
+            out.write(header.toByteArray(Charsets.US_ASCII))
 
-            val pjlHeader = "@PJL \r\n" +
-                    "@PJL JOB NAME = \"${job.title}\"\r\n" +
-                    "@PJL SET COPIES = ${job.copies}\r\n" +
-                    "@PJL ENTER LANGUAGE = PDF\r\n"
-            outputStream.write(pjlHeader.toByteArray())
-
-            while (documentStream.read(buffer).also { bytesRead = it } != -1) {
-                outputStream.write(buffer, 0, bytesRead)
-                totalBytes += bytesRead
+            var total = 0L
+            FileInputStream(file).use { input ->
+                val buf = ByteArray(16 * 1024)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                    total += n
+                }
             }
+            out.write(("\r\n" + uel + "@PJL EOJ\r\n" + uel).toByteArray(Charsets.US_ASCII))
+            out.flush()
 
-            val pjlFooter = "\r\n\u001B%-12345X@PJL EOJ\r\n\u001B%-12345X"
-            outputStream.write(pjlFooter.toByteArray())
-            outputStream.flush()
-
-            // BUG-08 FIX: Shutdown output stream first, signaling TCP FIN so the printer knows job is done
+            // Half-close, then wait for the printer to close its side so the tail of the job is not
+            // lost to a TCP reset when we drop the connection immediately.
+            try { socket.shutdownOutput() } catch (_: Exception) {}
             try {
-                socket.shutdownOutput()
-            } catch (_: Exception) {}
+                socket.soTimeout = 3000
+                val sink = ByteArray(256)
+                @Suppress("ControlFlowWithEmptyBody")
+                while (socket.getInputStream().read(sink) >= 0) { }
+            } catch (_: Exception) { /* timeout or reset after full delivery is fine */ }
 
-            socket.close()
-            Log.i("HpPrintEngine", "Print job sent successfully! Total bytes: $totalBytes")
+            Log.i("PrintEngine", "Job delivered ($total bytes)")
             Result.success(true)
         } catch (e: Exception) {
-            Log.e("HpPrintEngine", "Direct socket failure to ${printer.ipAddress}:${printer.port}", e)
-            Result.failure(e)
+            Log.e("PrintEngine", "RAW socket failure $host:$port", e)
+            Result.failure(Exception(e.message ?: e.javaClass.simpleName))
+        } finally {
+            try { socket?.close() } catch (_: Exception) {}
+        }
+    }
+
+    /** Raw PJL command (reports etc.). Returns the real delivery result. */
+    suspend fun sendPjl(printer: HpPrinter, commands: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        var socket: java.net.Socket? = null
+        try {
+            socket = router.createBoundSocket(printer.ipAddress, 9100, timeoutMs = 8000)
+            val uel = "\u001B%-12345X"
+            socket.getOutputStream().apply {
+                write((uel + "@PJL\r\n" + commands + "\r\n" + uel).toByteArray(Charsets.US_ASCII))
+                flush()
+            }
+            Result.success(true)
+        } catch (e: Exception) {
+            Result.failure(Exception(e.message ?: e.javaClass.simpleName))
+        } finally {
+            try { socket?.close() } catch (_: Exception) {}
         }
     }
 

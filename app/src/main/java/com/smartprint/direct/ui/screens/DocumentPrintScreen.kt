@@ -39,7 +39,7 @@ fun DocumentPrintScreen(
     ) { uri ->
         if (uri != null) {
             selectedUri = uri
-            documentName = uri.lastPathSegment?.substringAfterLast('/') ?: "document.pdf"
+            documentName = viewModel.fileDisplayName(uri, "document.pdf")
         }
     }
 

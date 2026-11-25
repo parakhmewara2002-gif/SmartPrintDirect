@@ -1,7 +1,16 @@
 package com.smartprint.direct.ui.screens
 
-import android.content.Context
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -40,8 +49,21 @@ fun CameraScanScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var isCameraReady by remember { mutableStateOf(false) }
-    var scanCount by remember { mutableStateOf(0) }
     var statusMessage by remember { mutableStateOf("Position document inside frame") }
+    val pages = remember { mutableStateListOf<File>() }
+    val scanCount = pages.size
+    var capturing by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+    var hasCamera by remember {
+        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasCamera = it }
+    val imageCapture = remember {
+        ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).build()
+    }
+
+    // Unsaved pages must not pile up in the cache
+    DisposableEffect(Unit) { onDispose { pages.forEach { it.delete() } } }
 
     Scaffold(
         topBar = {
@@ -54,9 +76,24 @@ fun CameraScanScreen(
                 },
                 actions = {
                     if (scanCount > 0) {
-                        TextButton(onClick = {
-                            viewModel.executeDirectCopy(scanCount, true)
-                            onBack()
+                        TextButton(enabled = !saving, onClick = {
+                            saving = true
+                            val toSave = pages.toList()
+                            pages.clear()
+                            viewModel.saveScan(toSave) { pdf ->
+                                if (pdf != null) {
+                                    try {
+                                        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdf)
+                                        val send = Intent(Intent.ACTION_SEND).apply {
+                                            type = "application/pdf"
+                                            putExtra(Intent.EXTRA_STREAM, uri)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        context.startActivity(Intent.createChooser(send, "Share scan").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                                    } catch (_: Exception) {}
+                                }
+                                onBack()
+                            }
                         }) {
                             Text("Save ($scanCount)", fontWeight = FontWeight.Bold, color = HpBlue)
                         }
@@ -73,7 +110,7 @@ fun CameraScanScreen(
                 .padding(padding)
         ) {
             // CameraX Viewfinder with optimized PreviewView configuration
-            AndroidView(
+            if (hasCamera) AndroidView(
                 factory = { ctx ->
                     val previewView = PreviewView(ctx).apply {
                         // COMPATIBLE mode uses TextureView which eliminates SurfaceView black flash on launch & navigation transitions
@@ -99,7 +136,8 @@ fun CameraScanScreen(
                             cameraProvider.bindToLifecycle(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
-                                preview
+                                preview,
+                                imageCapture
                             )
                         } catch (e: Exception) {
                             e.printStackTrace()
@@ -112,9 +150,21 @@ fun CameraScanScreen(
                 modifier = Modifier.fillMaxSize()
             )
 
+            if (!hasCamera) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text("Camera permission is needed to scan", color = Color.White, fontSize = 15.sp)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) { Text("Allow Camera") }
+                }
+            }
+
             // High-Tech Scanner Shutter Loading Overlay (Smoothly hides as soon as the camera is streaming)
             AnimatedVisibility(
-                visible = !isCameraReady,
+                visible = hasCamera && !isCameraReady,
                 enter = fadeIn(tween(100)),
                 exit = fadeOut(tween(250)),
                 modifier = Modifier.fillMaxSize()
@@ -171,9 +221,28 @@ fun CameraScanScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(
+                    enabled = hasCamera && !capturing,
                     onClick = {
-                        scanCount++
-                        statusMessage = "Page $scanCount captured! Auto-flattened."
+                        capturing = true
+                        val dir = File(context.cacheDir, "scan_pages").apply { mkdirs() }
+                        val file = File(dir, "page_${System.currentTimeMillis()}.jpg")
+                        imageCapture.takePicture(
+                            ImageCapture.OutputFileOptions.Builder(file).build(),
+                            ContextCompat.getMainExecutor(context),
+                            object : ImageCapture.OnImageSavedCallback {
+                                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                                    pages.add(file)
+                                    statusMessage = "Page ${pages.size} captured"
+                                    capturing = false
+                                }
+
+                                override fun onError(exception: ImageCaptureException) {
+                                    file.delete()
+                                    statusMessage = "Capture failed - try again"
+                                    capturing = false
+                                }
+                            }
+                        )
                     },
                     modifier = Modifier
                         .size(76.dp)

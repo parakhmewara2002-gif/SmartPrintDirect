@@ -191,7 +191,12 @@ class DualNetworkRouter(private val context: Context) {
             InetAddress.getByName(ipOrHost)
         }
 
-        socket.connect(InetSocketAddress(inetAddress, port), timeoutMs)
+        try {
+            socket.connect(InetSocketAddress(inetAddress, port), timeoutMs)
+        } catch (e: Exception) {
+            try { socket.close() } catch (_: Exception) {}
+            throw e
+        }
         return socket
     }
 

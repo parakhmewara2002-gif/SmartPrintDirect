@@ -11,7 +11,7 @@ import java.net.URL
 import java.util.regex.Pattern
 
 data class HpDeviceDetails(
-    val makeAndModel: String = "HP Smart Device",
+    val makeAndModel: String = "",
     val serialNumber: String = "Unknown",
     val firmwareVersion: String = "Unknown",
     val totalImpressions: Int = 0,
@@ -50,17 +50,19 @@ class HpAuthenticProtocol(private val router: DualNetworkRouter) {
             conn.readTimeout = 2500
             val text = conn.getInputStream().bufferedReader().use { it.readText() }
 
+            val tokens = Regex("<(?:\\w+:)?(?:StatusCategory|AlertCategory|AlertDetailsCategory|AlertID)>([^<]+)<")
+                .findAll(text).map { it.groupValues[1].lowercase() }.toList()
+            fun has(vararg k: String) = tokens.any { t -> k.any { t.contains(it) } }
             when {
-                text.contains("paperJam", ignoreCase = true) || text.contains("jam", ignoreCase = true) -> PrinterState.PAPER_JAM
-                text.contains("outOfPaper", ignoreCase = true) || text.contains("mediaEmpty", ignoreCase = true) -> PrinterState.OUT_OF_PAPER
-                text.contains("doorOpen", ignoreCase = true) || text.contains("coverOpen", ignoreCase = true) -> PrinterState.DOOR_OPEN
-                text.contains("printing", ignoreCase = true) || text.contains("busy", ignoreCase = true) -> PrinterState.PRINTING
-                text.contains("ready", ignoreCase = true) || text.contains("idle", ignoreCase = true) -> PrinterState.IDLE_READY
+                has("jam") -> PrinterState.PAPER_JAM
+                has("outofpaper", "mediaempty", "trayempty", "inputtrayempty", "nopaper") -> PrinterState.OUT_OF_PAPER
+                has("dooropen", "coveropen", "doorcover") -> PrinterState.DOOR_OPEN
+                has("processing", "printing", "busy", "warmingup") -> PrinterState.PRINTING
                 else -> PrinterState.IDLE_READY
             }
         } catch (e: Exception) {
             Log.w("HpProtocol", "Could not query ProductStatusDyn.xml: ${e.message}")
-            PrinterState.IDLE_READY
+            PrinterState.OFFLINE
         }
     }
 
@@ -83,7 +85,7 @@ class HpAuthenticProtocol(private val router: DualNetworkRouter) {
                 conn.readTimeout = 2500
                 HpInkStatusParser.parseEwsXml(conn.getInputStream())
             } catch (ex: Exception) {
-                HpInkStatusParser.defaultHpTanks()
+                emptyList()
             }
         }
     }
@@ -91,10 +93,11 @@ class HpAuthenticProtocol(private val router: DualNetworkRouter) {
     /**
      * Queries HP /DevMgmt/ProductConfigDyn.xml and /DevMgmt/ProductUsageDyn.xml
      */
-    suspend fun queryDeviceDetails(ipAddress: String): HpDeviceDetails = withContext(Dispatchers.IO) {
-        var model = "HP Smart Printer"
-        var serial = "HP-LOCAL"
-        var fw = "1.0.0"
+    suspend fun queryDeviceDetails(ipAddress: String): HpDeviceDetails? = withContext(Dispatchers.IO) {
+        var gotAnything = false
+        var model = ""
+        var serial = "Unknown"
+        var fw = "Unknown"
         var totalPages = 0
         var colorPages = 0
         var monoPages = 0
@@ -108,13 +111,14 @@ class HpAuthenticProtocol(private val router: DualNetworkRouter) {
             conn.readTimeout = 2500
             val text = conn.getInputStream().bufferedReader().use { it.readText() }
 
-            val modelMatcher = Pattern.compile("<MakeAndModel>(.*?)</MakeAndModel>").matcher(text)
+            gotAnything = true
+            val modelMatcher = Pattern.compile("<(?:\\w+:)?MakeAndModel>(.*?)</(?:\\w+:)?MakeAndModel>").matcher(text)
             if (modelMatcher.find()) model = modelMatcher.group(1)?.trim() ?: model
 
-            val serialMatcher = Pattern.compile("<SerialNumber>(.*?)</SerialNumber>").matcher(text)
+            val serialMatcher = Pattern.compile("<(?:\\w+:)?SerialNumber>(.*?)</(?:\\w+:)?SerialNumber>").matcher(text)
             if (serialMatcher.find()) serial = serialMatcher.group(1)?.trim() ?: serial
 
-            val fwMatcher = Pattern.compile("<FirmwareVersion>(.*?)</FirmwareVersion>").matcher(text)
+            val fwMatcher = Pattern.compile("<(?:\\w+:)?FirmwareVersion>(.*?)</(?:\\w+:)?FirmwareVersion>").matcher(text)
             if (fwMatcher.find()) fw = fwMatcher.group(1)?.trim() ?: fw
         } catch (_: Exception) {}
 
@@ -126,13 +130,14 @@ class HpAuthenticProtocol(private val router: DualNetworkRouter) {
             conn.readTimeout = 2500
             val text = conn.getInputStream().bufferedReader().use { it.readText() }
 
-            val totalM = Pattern.compile("<TotalImpressions>(\\d+)</TotalImpressions>").matcher(text)
+            gotAnything = true
+            val totalM = Pattern.compile("<(?:\\w+:)?TotalImpressions>(\\d+)</(?:\\w+:)?TotalImpressions>").matcher(text)
             if (totalM.find()) totalPages = totalM.group(1)?.toIntOrNull() ?: 0
 
-            val colorM = Pattern.compile("<ColorImpressions>(\\d+)</ColorImpressions>").matcher(text)
+            val colorM = Pattern.compile("<(?:\\w+:)?ColorImpressions>(\\d+)</(?:\\w+:)?ColorImpressions>").matcher(text)
             if (colorM.find()) colorPages = colorM.group(1)?.toIntOrNull() ?: 0
 
-            val monoM = Pattern.compile("<MonochromeImpressions>(\\d+)</MonochromeImpressions>").matcher(text)
+            val monoM = Pattern.compile("<(?:\\w+:)?MonochromeImpressions>(\\d+)</(?:\\w+:)?MonochromeImpressions>").matcher(text)
             if (monoM.find()) monoPages = monoM.group(1)?.toIntOrNull() ?: 0
         } catch (_: Exception) {}
 
@@ -146,6 +151,8 @@ class HpAuthenticProtocol(private val router: DualNetworkRouter) {
             if (text.contains("<pwg:State>Idle</pwg:State>")) scanStatus = "Scanner Idle & Ready"
             else if (text.contains("<pwg:State>Processing</pwg:State>")) scanStatus = "Scanning in Progress"
         } catch (_: Exception) {}
+
+        if (!gotAnything) return@withContext null
 
         HpDeviceDetails(
             makeAndModel = model,

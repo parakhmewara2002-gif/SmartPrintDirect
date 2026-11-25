@@ -19,6 +19,9 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
+import androidx.lifecycle.Lifecycle
+import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
@@ -70,7 +73,9 @@ class MainActivity : ComponentActivity() {
             requestPermissionsLauncher.launch(needed.toTypedArray())
         }
 
-        handleIntent(intent)
+        // Only on a fresh launch: after rotation/theme recreation the same SEND intent is still
+        // attached and would otherwise print the shared document again.
+        if (savedInstanceState == null) handleIntent(intent)
 
         setContent {
             SmartPrintTheme {
@@ -81,18 +86,38 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleIntent(intent)
     }
 
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
-        if (intent.action == Intent.ACTION_SEND) {
-            @Suppress("DEPRECATION")
-            val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-            if (uri != null) {
-                viewModel.printDocument(uri, "Shared Document")
-            }
+        val uris: List<Uri> = when (intent.action) {
+            Intent.ACTION_SEND -> listOfNotNull(
+                IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+            )
+            Intent.ACTION_SEND_MULTIPLE ->
+                IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+            else -> emptyList()
         }
+        if (uris.isEmpty()) return
+        // Consume it so it can never be handled twice
+        this.intent = Intent(Intent.ACTION_MAIN)
+        uris.forEach { viewModel.printSharedUri(it) }
+    }
+}
+
+private fun NavController.safeNavigate(route: String) {
+    // Ignore taps while a transition is running (double tap pushed the same screen twice)
+    if (currentBackStackEntry?.lifecycle?.currentState == Lifecycle.State.RESUMED) {
+        navigate(route) { launchSingleTop = true }
+    }
+}
+
+private fun NavController.safeBack() {
+    // A double tap on Back used to pop past the start destination and leave a blank screen
+    if (currentBackStackEntry?.lifecycle?.currentState == Lifecycle.State.RESUMED && previousBackStackEntry != null) {
+        popBackStack()
     }
 }
 
@@ -118,31 +143,31 @@ fun AppNavigation(viewModel: SmartPrintViewModel) {
         composable("dashboard") {
             DashboardScreen(
                 viewModel = viewModel,
-                onNavigateToDocumentPrint = { navController.navigate("document_print") },
-                onNavigateToPhotoPrint = { navController.navigate("photo_print") },
-                onNavigateToCameraScan = { navController.navigate("camera_scan") },
-                onNavigateToDirectCopy = { navController.navigate("direct_copy") },
-                onNavigateToIdCardPrint = { navController.navigate("id_card_print") },
-                onNavigateToReports = { navController.navigate("reports") }
+                onNavigateToDocumentPrint = { navController.safeNavigate("document_print") },
+                onNavigateToPhotoPrint = { navController.safeNavigate("photo_print") },
+                onNavigateToCameraScan = { navController.safeNavigate("camera_scan") },
+                onNavigateToDirectCopy = { navController.safeNavigate("direct_copy") },
+                onNavigateToIdCardPrint = { navController.safeNavigate("id_card_print") },
+                onNavigateToReports = { navController.safeNavigate("reports") }
             )
         }
         composable("document_print") {
-            DocumentPrintScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
+            DocumentPrintScreen(viewModel = viewModel, onBack = { navController.safeBack() })
         }
         composable("photo_print") {
-            PhotoPrintScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
+            PhotoPrintScreen(viewModel = viewModel, onBack = { navController.safeBack() })
         }
         composable("camera_scan") {
-            CameraScanScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
+            CameraScanScreen(viewModel = viewModel, onBack = { navController.safeBack() })
         }
         composable("direct_copy") {
-            DirectCopyScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
+            DirectCopyScreen(viewModel = viewModel, onBack = { navController.safeBack() })
         }
         composable("id_card_print") {
-            IdCardPrintScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
+            IdCardPrintScreen(viewModel = viewModel, onBack = { navController.safeBack() })
         }
         composable("reports") {
-            PrinterReportsScreen(viewModel = viewModel, onBack = { navController.popBackStack() })
+            PrinterReportsScreen(viewModel = viewModel, onBack = { navController.safeBack() })
         }
     }
 }

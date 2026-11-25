@@ -2,6 +2,9 @@ package com.smartprint.direct.ui.screens
 
 import android.graphics.Bitmap
 import android.net.Uri
+import android.widget.Toast
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -68,17 +71,51 @@ fun IdCardPrintScreen(
         }
     }
 
+    // Full-resolution capture into app cache (TakePicturePreview only returns a tiny thumbnail,
+    // which made ID copies blurry)
+    var pendingCapture by remember { mutableStateOf<Uri?>(null) }
+    var pendingFile by remember { mutableStateOf<File?>(null) }
+
     val takePictureLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicturePreview()
-    ) { bmp ->
-        if (bmp != null) {
-            if (activeSlot == "front") {
-                frontBitmap = bmp
-                activeSlot = if (backBitmap == null) "back" else null
-            } else if (activeSlot == "back") {
-                backBitmap = bmp
-                activeSlot = null
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        val file = pendingFile
+        pendingCapture = null
+        pendingFile = null
+        if (success && file != null) {
+            val slot = activeSlot
+            scope.launch {
+                val bmp = withContext(Dispatchers.IO) {
+                    val b = com.smartprint.direct.util.BitmapLoader.decode(file, 2048)
+                    file.delete()
+                    b
+                }
+                if (bmp != null) {
+                    if (slot == "front") {
+                        frontBitmap = bmp
+                        activeSlot = if (backBitmap == null) "back" else null
+                    } else if (slot == "back") {
+                        backBitmap = bmp
+                        activeSlot = null
+                    }
+                }
             }
+        } else {
+            file?.delete()
+        }
+    }
+
+    fun startCapture() {
+        try {
+            val dir = File(context.cacheDir, "print_jobs").apply { mkdirs() }
+            val file = File(dir, "id_capture_${System.currentTimeMillis()}.jpg")
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            pendingFile = file
+            pendingCapture = uri
+            takePictureLauncher.launch(uri)
+        } catch (e: Exception) {
+            // e.g. SecurityException when the CAMERA permission was denied
+            Toast.makeText(context, "Camera unavailable - allow camera permission in Settings", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -163,7 +200,7 @@ fun IdCardPrintScreen(
                         Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                             TextButton(onClick = {
                                 activeSlot = "front"
-                                takePictureLauncher.launch(null)
+                                startCapture()
                             }) {
                                 Text("Retake Camera", fontSize = 12.sp)
                             }
@@ -182,7 +219,7 @@ fun IdCardPrintScreen(
                             OutlinedButton(
                                 onClick = {
                                     activeSlot = "front"
-                                    takePictureLauncher.launch(null)
+                                    startCapture()
                                 },
                                 modifier = Modifier.weight(1f)
                             ) {
@@ -244,7 +281,7 @@ fun IdCardPrintScreen(
                         Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                             TextButton(onClick = {
                                 activeSlot = "back"
-                                takePictureLauncher.launch(null)
+                                startCapture()
                             }) {
                                 Text("Retake Camera", fontSize = 12.sp)
                             }
@@ -263,7 +300,7 @@ fun IdCardPrintScreen(
                             OutlinedButton(
                                 onClick = {
                                     activeSlot = "back"
-                                    takePictureLauncher.launch(null)
+                                    startCapture()
                                 },
                                 modifier = Modifier.weight(1f)
                             ) {
@@ -343,20 +380,26 @@ fun IdCardPrintScreen(
 
             Button(
                 onClick = {
-                    if (frontBitmap != null && backBitmap != null) {
-                        val pdfUri = IdCardPdfGenerator.createIdCardA4Pdf(
-                            context = context,
-                            frontBitmap = frontBitmap!!,
-                            backBitmap = backBitmap!!,
-                            isColor = isColor
-                        )
-                        viewModel.printDocument(
-                            uri = pdfUri,
-                            title = "ID_Card_2in1_Copy.pdf",
-                            copies = copies,
-                            colorMode = if (isColor) ColorMode.COLOR else ColorMode.MONOCHROME
-                        )
-                        onBack()
+                    val front = frontBitmap
+                    val back = backBitmap
+                    if (front != null && back != null) {
+                        scope.launch {
+                            val pdfUri = withContext(Dispatchers.IO) {
+                                IdCardPdfGenerator.createIdCardA4Pdf(
+                                    context = context,
+                                    frontBitmap = front,
+                                    backBitmap = back,
+                                    isColor = isColor
+                                )
+                            }
+                            viewModel.printDocument(
+                                uri = pdfUri,
+                                title = "ID_Card_2in1_Copy.pdf",
+                                copies = copies,
+                                colorMode = if (isColor) ColorMode.COLOR else ColorMode.MONOCHROME
+                            )
+                            onBack()
+                        }
                     }
                 },
                 enabled = isReady,

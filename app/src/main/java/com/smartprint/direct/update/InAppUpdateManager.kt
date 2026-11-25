@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.Settings
 import android.util.Log
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,9 @@ class InAppUpdateManager(private val context: Context) {
     private val _isDownloading = MutableStateFlow(false)
     val isDownloading: StateFlow<Boolean> = _isDownloading.asStateFlow()
 
+    private val _downloadError = MutableStateFlow<String?>(null)
+    val downloadError: StateFlow<String?> = _downloadError.asStateFlow()
+
     private val _downloadProgress = MutableStateFlow(0)
     val downloadProgress: StateFlow<Int> = _downloadProgress.asStateFlow()
 
@@ -62,6 +66,7 @@ class InAppUpdateManager(private val context: Context) {
                 setRequestProperty("User-Agent", "SmartPrintDirect-Android")
             }
 
+            try {
             if (connection.responseCode == 200) {
                 val jsonStr = connection.inputStream.bufferedReader().use { it.readText() }
                 val json = JSONObject(jsonStr)
@@ -72,7 +77,7 @@ class InAppUpdateManager(private val context: Context) {
                 val sha = json.optString("expectedSha256", "")
 
                 val update = UpdateInfo(
-                    hasUpdate = remoteCode > currentVersionCode,
+                    hasUpdate = remoteCode > currentVersionCode && apkUrl.startsWith("https://"),
                     latestVersionCode = remoteCode,
                     latestVersionName = remoteName,
                     releaseNotes = notes,
@@ -82,56 +87,96 @@ class InAppUpdateManager(private val context: Context) {
                 _updateState.value = update
                 return@withContext update
             }
+            } finally {
+                connection.disconnect()
+            }
         } catch (e: Exception) {
             Log.w("InAppUpdate", "Could not check for update: ${e.message}")
         }
         null
     }
 
+    private var downloadReceiver: BroadcastReceiver? = null
+
     fun startUpdateDownload(apkUrl: String, expectedSha256: String) {
         if (_isDownloading.value) return
+        _downloadError.value = null
+
+        if (!apkUrl.startsWith("https://")) {
+            _downloadError.value = "Update link is invalid"
+            return
+        }
+        // The APK is installed with the user's permission, so refuse anything we cannot verify.
+        if (expectedSha256.length != 64) {
+            _downloadError.value = "Update is missing its checksum - not installing"
+            return
+        }
+        // Without this the system installer silently refuses the APK.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+            try {
+                context.startActivity(
+                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } catch (_: Exception) {}
+            _downloadError.value = "Allow \"Install unknown apps\" for this app, then tap Update again"
+            return
+        }
+
         _isDownloading.value = true
         _downloadProgress.value = 10
 
-        val fileName = "SmartPrintDirect_Update.apk"
-        val destination = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
+        val destination = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "SmartPrintDirect_Update.apk")
         if (destination.exists()) destination.delete()
 
-        val request = DownloadManager.Request(Uri.parse(apkUrl))
-            .setTitle("HP Smart Direct Update")
-            .setDescription("Downloading latest update securely...")
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationUri(Uri.fromFile(destination))
-
         val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        val downloadId = downloadManager.enqueue(request)
+        val downloadId = try {
+            downloadManager.enqueue(
+                DownloadManager.Request(Uri.parse(apkUrl))
+                    .setTitle("HP Smart Direct Update")
+                    .setDescription("Downloading latest update securely...")
+                    .setMimeType("application/vnd.android.package-archive")
+                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                    .setDestinationUri(Uri.fromFile(destination))
+            )
+        } catch (e: Exception) {
+            _isDownloading.value = false
+            _downloadError.value = "Could not start download: ${e.message}"
+            return
+        }
 
         val onComplete = object : BroadcastReceiver() {
             override fun onReceive(ctxt: Context?, intent: Intent?) {
                 val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
-                if (id == downloadId) {
-                    _isDownloading.value = false
-                    _downloadProgress.value = 100
-                    try { context.unregisterReceiver(this) } catch (_: Exception) {}
+                if (id != downloadId) return
+                _isDownloading.value = false
+                try { context.unregisterReceiver(this) } catch (_: Exception) {}
+                downloadReceiver = null
 
-                    if (!destination.exists()) {
-                        Log.e("InAppUpdate", "Downloaded APK missing")
-                        return
+                // ACTION_DOWNLOAD_COMPLETE also fires for failed downloads - check the real status
+                var ok = false
+                downloadManager.query(DownloadManager.Query().setFilterById(downloadId))?.use { c ->
+                    if (c.moveToFirst()) {
+                        ok = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)) == DownloadManager.STATUS_SUCCESSFUL
                     }
-
-                    if (expectedSha256.isNotBlank() && expectedSha256.length == 64) {
-                        val computed = calculateSha256(destination)
-                        if (!computed.equals(expectedSha256, ignoreCase = true)) {
-                            Log.e("InAppUpdate", "Hash verification failed: $computed != $expectedSha256")
-                            destination.delete()
-                            return
-                        }
-                    }
-
-                    installDownloadedApk(destination)
                 }
+                if (!ok || !destination.exists()) {
+                    _downloadError.value = "Update download failed - check your connection"
+                    return
+                }
+
+                val computed = calculateSha256(destination)
+                if (!computed.equals(expectedSha256, ignoreCase = true)) {
+                    Log.e("InAppUpdate", "Hash verification failed: $computed != $expectedSha256")
+                    destination.delete()
+                    _downloadError.value = "Update file is corrupted (checksum mismatch) - not installed"
+                    return
+                }
+                _downloadProgress.value = 100
+                installDownloadedApk(destination)
             }
         }
+        downloadReceiver = onComplete
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.registerReceiver(onComplete, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), Context.RECEIVER_NOT_EXPORTED)

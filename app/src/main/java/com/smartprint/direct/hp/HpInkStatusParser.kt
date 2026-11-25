@@ -18,13 +18,13 @@ object HpInkStatusParser {
             // HP EWS XML standard markers
             // Look for <ConsumableLabelCode>C, M, Y, K</ConsumableLabelCode> and <ConsumablePercentageLevelRemaining>
             val pattern = Pattern.compile(
-                "<ConsumableLabelCode>(.*?)</ConsumableLabelCode>.*?<ConsumablePercentageLevelRemaining>(\\d+)</ConsumablePercentageLevelRemaining>",
+                "<(?:\\w+:)?ConsumableLabelCode>(.*?)</(?:\\w+:)?ConsumableLabelCode>.*?<(?:\\w+:)?ConsumablePercentageLevelRemaining>(\\d+)</(?:\\w+:)?ConsumablePercentageLevelRemaining>",
                 Pattern.DOTALL
             )
             val matcher = pattern.matcher(xmlText)
             while (matcher.find()) {
                 val code = matcher.group(1)?.trim() ?: ""
-                val level = matcher.group(2)?.toIntOrNull() ?: 100
+                val level = (matcher.group(2)?.toIntOrNull() ?: continue).coerceIn(0, 100)
                 when {
                     code.contains("K", ignoreCase = true) || code.contains("Black", ignoreCase = true) ->
                         cartridges.add(InkCartridge("Black", 0xFF1A1A1AL, level))
@@ -39,7 +39,7 @@ object HpInkStatusParser {
 
             if (cartridges.isEmpty()) {
                 // Secondary fallback pattern for HP DeskJet / Ink Advantage XML format
-                val fallbackPattern = Pattern.compile("<dd:ConsumablePercentageLevelRemaining>(\\d+)</dd:ConsumablePercentageLevelRemaining>")
+                val fallbackPattern = Pattern.compile("<(?:\\w+:)?ConsumablePercentageLevelRemaining>(\\d+)</(?:\\w+:)?ConsumablePercentageLevelRemaining>")
                 val fbMatcher = fallbackPattern.matcher(xmlText)
                 val levels = mutableListOf<Int>()
                 while (fbMatcher.find()) {
@@ -60,15 +60,6 @@ object HpInkStatusParser {
             Log.w("HpInkStatusParser", "Error parsing HP XML", e)
         }
 
-        return if (cartridges.isNotEmpty()) cartridges else defaultHpTanks()
-    }
-
-    fun defaultHpTanks(): List<InkCartridge> {
-        return listOf(
-            InkCartridge("Black", 0xFF1A1A1AL, 85),
-            InkCartridge("Cyan", 0xFF00AEEFL, 70),
-            InkCartridge("Magenta", 0xFFEC008CL, 65),
-            InkCartridge("Yellow", 0xFFFFF100L, 90)
-        )
+        return cartridges // empty = unknown; the UI hides the gauge
     }
 }

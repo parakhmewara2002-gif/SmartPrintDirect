@@ -138,7 +138,7 @@ fun PhotoPrintScreen(
             Button(
                 onClick = {
                     selectedUri?.let { uri ->
-                        viewModel.printDocument(uri, "Photo_${System.currentTimeMillis()}")
+                        viewModel.printDocument(uri, "Photo_${System.currentTimeMillis()}", paperSize = selectedPaperSize, borderless = borderless)
                         onBack()
                     }
                 },

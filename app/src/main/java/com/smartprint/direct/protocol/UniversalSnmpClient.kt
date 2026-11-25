@@ -28,9 +28,15 @@ object UniversalSnmpClient {
         0x01, 0x01, 0x00, 0x05, 0x00
     )
 
-    suspend fun identifyPrinter(ipAddress: String, timeoutMs: Int = 2000): SnmpPrinterIdentification? = withContext(Dispatchers.IO) {
+    suspend fun identifyPrinter(
+        ipAddress: String,
+        timeoutMs: Int = 2000,
+        network: android.net.Network? = null
+    ): SnmpPrinterIdentification? = withContext(Dispatchers.IO) {
+        var socket: DatagramSocket? = null
         try {
-            val socket = DatagramSocket()
+            socket = DatagramSocket()
+            try { network?.bindSocket(socket) } catch (_: Exception) {}
             socket.soTimeout = timeoutMs
             val address = InetAddress.getByName(ipAddress)
             val packet = DatagramPacket(SNMP_GET_SYSDESCR, SNMP_GET_SYSDESCR.size, address, 161)
@@ -39,13 +45,14 @@ object UniversalSnmpClient {
             val receiveData = ByteArray(1500)
             val receivePacket = DatagramPacket(receiveData, receiveData.size)
             socket.receive(receivePacket)
-            socket.close()
 
             val text = String(receiveData, 0, receivePacket.length)
             return@withContext parseBrandAndModel(text)
         } catch (e: Exception) {
             // SNMP query timed out or port closed
             return@withContext null
+        } finally {
+            try { socket?.close() } catch (_: Exception) {}
         }
     }
 
@@ -55,7 +62,7 @@ object UniversalSnmpClient {
             lower.contains("canon") -> PrinterBrand.CANON
             lower.contains("epson") -> PrinterBrand.EPSON
             lower.contains("brother") -> PrinterBrand.BROTHER
-            lower.contains("hp") || lower.contains("hewlett-packard") -> PrinterBrand.HP
+            Regex("\\bhp\\b").containsMatchIn(lower) || lower.contains("hewlett") -> PrinterBrand.HP
             lower.contains("samsung") -> PrinterBrand.SAMSUNG
             lower.contains("pantum") -> PrinterBrand.PANTUM
             lower.contains("ricoh") -> PrinterBrand.RICOH
@@ -69,32 +76,7 @@ object UniversalSnmpClient {
         return SnmpPrinterIdentification(brand = brand, modelName = model)
     }
 
-    fun defaultBrandTanks(brand: PrinterBrand): List<InkCartridge> {
-        return when (brand) {
-            PrinterBrand.CANON -> listOf(
-                InkCartridge("Black (PGBK)", 0xFF1A1A1AL, 80),
-                InkCartridge("Cyan", 0xFF00AEEFL, 75),
-                InkCartridge("Magenta", 0xFFEC008CL, 70),
-                InkCartridge("Yellow", 0xFFFFF100L, 85)
-            )
-            PrinterBrand.EPSON -> listOf(
-                InkCartridge("Black", 0xFF1A1A1AL, 90),
-                InkCartridge("Cyan", 0xFF00AEEFL, 80),
-                InkCartridge("Magenta", 0xFFEC008CL, 75),
-                InkCartridge("Yellow", 0xFFFFF100L, 80)
-            )
-            PrinterBrand.BROTHER -> listOf(
-                InkCartridge("Black (BTD60)", 0xFF1A1A1AL, 85),
-                InkCartridge("Cyan (BT5000C)", 0xFF00AEEFL, 70),
-                InkCartridge("Magenta (BT5000M)", 0xFFEC008CL, 65),
-                InkCartridge("Yellow (BT5000Y)", 0xFFFFF100L, 85)
-            )
-            else -> listOf(
-                InkCartridge("Black", 0xFF1A1A1AL, 85),
-                InkCartridge("Cyan", 0xFF00AEEFL, 70),
-                InkCartridge("Magenta", 0xFFEC008CL, 65),
-                InkCartridge("Yellow", 0xFFFFF100L, 90)
-            )
-        }
-    }
+    /** Supply levels come only from the printer itself; unknown stays empty (no invented numbers). */
+    @Suppress("UNUSED_PARAMETER")
+    fun defaultBrandTanks(brand: PrinterBrand): List<InkCartridge> = emptyList()
 }

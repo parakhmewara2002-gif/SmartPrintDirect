@@ -15,7 +15,9 @@ import com.smartprint.direct.model.PrintProtocol
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.InputStream
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
+import java.io.FileInputStream
 
 /**
  * Universal USB OTG Printer Manager (Production Hardened)
@@ -42,7 +44,7 @@ class UsbPrinterManager(private val context: Context) {
                         name.contains("canon", ignoreCase = true) -> PrinterBrand.CANON
                         name.contains("epson", ignoreCase = true) -> PrinterBrand.EPSON
                         name.contains("brother", ignoreCase = true) -> PrinterBrand.BROTHER
-                        name.contains("hp", ignoreCase = true) -> PrinterBrand.HP
+                        Regex("\\bhp\\b", RegexOption.IGNORE_CASE).containsMatchIn(name) || name.contains("hewlett", ignoreCase = true) -> PrinterBrand.HP
                         name.contains("pantum", ignoreCase = true) -> PrinterBrand.PANTUM
                         else -> PrinterBrand.GENERIC
                     }
@@ -65,53 +67,72 @@ class UsbPrinterManager(private val context: Context) {
         return list
     }
 
-    suspend fun printViaUsb(device: UsbDevice, documentStream: InputStream): Result<Boolean> = withContext(Dispatchers.IO) {
+    fun findDeviceById(id: String): UsbDevice? =
+        usbManager.deviceList.values.firstOrNull { "usb_${it.deviceId}" == id }
+
+    suspend fun printViaUsbById(id: String, file: File): Result<Boolean> {
+        val device = findDeviceById(id)
+            ?: return Result.failure(Exception("USB printer disconnected - reconnect the OTG cable"))
+        return printViaUsb(device, file)
+    }
+
+    suspend fun printViaUsb(device: UsbDevice, file: File): Result<Boolean> = withContext(Dispatchers.IO) {
+        var connection: UsbDeviceConnection? = null
+        var claimed: UsbInterface? = null
         try {
-            // BUG-05 FIX: Check and request USB Permission if not already granted
             if (!usbManager.hasPermission(device)) {
-                val granted = requestUsbPermission(device)
-                if (!granted) {
-                    return@withContext Result.failure(Exception("USB OTG permission was denied by user"))
+                val granted = withTimeoutOrNull(60_000) { requestUsbPermission(device) }
+                if (granted != true) {
+                    return@withContext Result.failure(Exception("USB permission was denied or timed out"))
                 }
             }
 
             var printerInterface: UsbInterface? = null
             var outEndpoint: UsbEndpoint? = null
-
-            for (i in 0 until device.interfaceCount) {
+            loop@ for (i in 0 until device.interfaceCount) {
                 val intf = device.getInterface(i)
-                if (intf.interfaceClass == USB_CLASS_PRINTER) {
-                    printerInterface = intf
-                    for (e in 0 until intf.endpointCount) {
-                        val ep = intf.getEndpoint(e)
-                        if (ep.direction == UsbConstants.USB_DIR_OUT) {
-                            outEndpoint = ep
-                            break
-                        }
+                if (intf.interfaceClass != USB_CLASS_PRINTER) continue
+                for (e in 0 until intf.endpointCount) {
+                    val ep = intf.getEndpoint(e)
+                    if (ep.type == UsbConstants.USB_ENDPOINT_XFER_BULK && ep.direction == UsbConstants.USB_DIR_OUT) {
+                        printerInterface = intf
+                        outEndpoint = ep
+                        break@loop
                     }
-                    break
                 }
             }
-
             if (printerInterface == null || outEndpoint == null) {
                 return@withContext Result.failure(Exception("No USB printer OUT endpoint found"))
             }
 
-            val connection = usbManager.openDevice(device) ?: return@withContext Result.failure(Exception("Cannot open USB device"))
-            connection.claimInterface(printerInterface, true)
-
-            val buffer = ByteArray(4096)
-            var bytesRead: Int
-            while (documentStream.read(buffer).also { bytesRead = it } != -1) {
-                connection.bulkTransfer(outEndpoint, buffer, bytesRead, 5000)
+            connection = usbManager.openDevice(device)
+                ?: return@withContext Result.failure(Exception("Cannot open USB device"))
+            if (!connection.claimInterface(printerInterface, true)) {
+                return@withContext Result.failure(Exception("Could not claim the USB printer interface"))
             }
+            claimed = printerInterface
 
-            connection.releaseInterface(printerInterface)
-            connection.close()
+            val buffer = ByteArray(16 * 1024)
+            FileInputStream(file).use { input ->
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    var sent = 0
+                    while (sent < n) {
+                        // bulkTransfer returns the byte count or a negative value on failure/timeout
+                        val r = connection.bulkTransfer(outEndpoint, buffer, sent, n - sent, 10_000)
+                        if (r <= 0) throw java.io.IOException("USB transfer failed (code $r)")
+                        sent += r
+                    }
+                }
+            }
             Result.success(true)
         } catch (e: Exception) {
             Log.e("UsbPrinter", "USB Print failed", e)
-            Result.failure(e)
+            Result.failure(Exception(e.message ?: e.javaClass.simpleName))
+        } finally {
+            try { claimed?.let { connection?.releaseInterface(it) } } catch (_: Exception) {}
+            try { connection?.close() } catch (_: Exception) {}
         }
     }
 
@@ -127,8 +148,9 @@ class UsbPrinterManager(private val context: Context) {
             }
         }
 
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-        val pendingIntent = PendingIntent.getBroadcast(context, 0, Intent(ACTION_USB_PERMISSION), flags)
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+        val intent = Intent(ACTION_USB_PERMISSION).setPackage(context.packageName)
+        val pendingIntent = PendingIntent.getBroadcast(context, 0, intent, flags)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.registerReceiver(receiver, IntentFilter(ACTION_USB_PERMISSION), Context.RECEIVER_NOT_EXPORTED)
@@ -136,7 +158,11 @@ class UsbPrinterManager(private val context: Context) {
             context.registerReceiver(receiver, IntentFilter(ACTION_USB_PERMISSION))
         }
 
-        usbManager.requestPermission(device, pendingIntent)
-        return deferred.await()
+        return try {
+            usbManager.requestPermission(device, pendingIntent)
+            deferred.await()
+        } finally {
+            try { context.unregisterReceiver(receiver) } catch (_: Exception) {}
+        }
     }
 }

@@ -54,13 +54,13 @@ object IdCardPdfGenerator {
         // 1. Draw Front ID Card (Top Half: Y = 110f)
         val frontY = 110f
         val frontRect = RectF(centerX, frontY, centerX + targetWidth, frontY + targetHeight)
-        canvas.drawBitmap(frontBitmap, null, frontRect, bitmapPaint)
+        canvas.drawBitmap(frontBitmap, null, fitRect(frontBitmap, frontRect), bitmapPaint)
         canvas.drawRoundRect(frontRect, 10f, 10f, borderPaint)
 
         // 2. Draw Back ID Card (Bottom Half: Y = 460f)
         val backY = 460f
         val backRect = RectF(centerX, backY, centerX + targetWidth, backY + targetHeight)
-        canvas.drawBitmap(backBitmap, null, backRect, bitmapPaint)
+        canvas.drawBitmap(backBitmap, null, fitRect(backBitmap, backRect), bitmapPaint)
         canvas.drawRoundRect(backRect, 10f, 10f, borderPaint)
 
         // Subtle Header Text
@@ -83,23 +83,17 @@ object IdCardPdfGenerator {
         return FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", outputFile)
     }
 
-    fun uriToBitmap(context: Context, uri: Uri): Bitmap? {
-        return try {
-            // Decode at a bounded size: full-res camera photos (12MP+) freeze the UI and are drawn
-            // every frame. 2048px on the long edge is plenty for a half-A4 ID card at 300dpi.
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            var sample = 1
-            val longEdge = maxOf(bounds.outWidth, bounds.outHeight)
-            while (longEdge / (sample * 2) >= 2048) sample *= 2
-            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, opts)
-            }
-        } catch (_: Exception) {
-            null
-        }
+    /** Largest centred rect inside [frame] with the bitmap's own aspect ratio (no stretching). */
+    private fun fitRect(bmp: Bitmap, frame: RectF): RectF {
+        val scale = minOf(frame.width() / bmp.width, frame.height() / bmp.height)
+        val w = bmp.width * scale
+        val h = bmp.height * scale
+        val l = frame.left + (frame.width() - w) / 2f
+        val t = frame.top + (frame.height() - h) / 2f
+        return RectF(l, t, l + w, t + h)
     }
+
+    fun uriToBitmap(context: Context, uri: Uri): Bitmap? = BitmapLoader.decode(context, uri, 2048)
 
     fun createPlaceholderCard(text: String, colorHex: Long): Bitmap {
         val w = 720

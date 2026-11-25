@@ -28,6 +28,7 @@ object LprPrintProtocol {
         router: DualNetworkRouter
     ): Result<Boolean> = withContext(Dispatchers.IO) {
         var tempSpoolFile: File? = null
+        var socket: Socket? = null
         try {
             Log.i("LprPrint", "Connecting to LPD printer at $ipAddress:$LPR_PORT queue=$queueName")
 
@@ -38,9 +39,11 @@ object LprPrintProtocol {
             }
             val docSize = tempSpoolFile.length()
 
-            val socket: Socket = router.createBoundSocket(ipAddress, LPR_PORT, timeoutMs = 8000)
-            val out: OutputStream = socket.getOutputStream()
-            val input: InputStream = socket.getInputStream()
+            val sock: Socket = router.createBoundSocket(ipAddress, LPR_PORT, timeoutMs = 8000)
+            socket = sock
+            sock.soTimeout = 15000
+            val out: OutputStream = sock.getOutputStream()
+            val input: InputStream = sock.getInputStream()
 
             // 1. Send Receive a printer job command: \x02 + queue + \n
             out.write("\u0002$queueName\n".toByteArray())
@@ -48,7 +51,8 @@ object LprPrintProtocol {
             checkAck(input)
 
             // 2. Send Control file: \x02 + size + " cfA001localhost\n"
-            val controlContent = "Hlocalhost\nPmobile\nJ$jobName\nldfA001localhost\nUdfA001localhost\nN$jobName\n"
+            val safeName = jobName.filter { it in ' '..'~' }.replace("\n", " ").take(60).ifBlank { "SmartPrintJob" }
+            val controlContent = "Hlocalhost\nPmobile\nJ$safeName\nldfA001localhost\nUdfA001localhost\nN$safeName\n"
             val cfBytes = controlContent.toByteArray()
             out.write("\u0002${cfBytes.size} cfA001localhost\n".toByteArray())
             out.flush()
@@ -76,22 +80,25 @@ object LprPrintProtocol {
             out.flush()
             checkAck(input)
 
-            socket.shutdownOutput()
-            socket.close()
+            try { sock.shutdownOutput() } catch (_: Exception) {}
             Log.i("LprPrint", "LPR job successfully completed ($docSize bytes)")
             Result.success(true)
         } catch (e: Exception) {
             Log.e("LprPrint", "LPR printing error", e)
             Result.failure(e)
         } finally {
+            try { socket?.close() } catch (_: Exception) {}
             tempSpoolFile?.delete()
         }
     }
 
+    /** RFC 1179: 0 = accepted. Anything else (or EOF) means the printer refused the job. */
     private fun checkAck(input: InputStream) {
         val ack = input.read()
         if (ack != 0) {
-            Log.w("LprPrint", "LPD warning: non-zero ack received: $ack")
+            throw java.io.IOException(
+                if (ack == -1) "LPD printer closed the connection" else "LPD printer rejected the job (code $ack)"
+            )
         }
     }
 }

@@ -73,12 +73,8 @@ data class HpPrinter(
     val isOnline: Boolean = true,
     val state: PrinterState = PrinterState.IDLE_READY,
     val connectionType: ConnectionType = ConnectionType.WIFI_NETWORK,
-    val inkLevels: List<InkCartridge> = listOf(
-        InkCartridge("Black", 0xFF1A1A1AL, 85),
-        InkCartridge("Cyan", 0xFF00AEEFL, 70),
-        InkCartridge("Magenta", 0xFFEC008CL, 65),
-        InkCartridge("Yellow", 0xFFFFF100L, 90)
-    )
+    // Empty = unknown / not reported. Never invent supply levels.
+    val inkLevels: List<InkCartridge> = emptyList()
 )
 
 data class PrintJob(
